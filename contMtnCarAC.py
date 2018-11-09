@@ -36,7 +36,7 @@ def featurize_state(state):
     """
     Returns the featurized representation for a state.
     """
-    state[np.isnan(state)] = 0
+    # state[np.isnan(state)] = 0
     scaled = scaler.transform([state])
     featurized = featurizer.transform(scaled)
     return featurized[0]
@@ -48,17 +48,18 @@ class ActorCritic(models.Model):
         super(ActorCritic, self).__init__()
         self.env = env
         self.num_eps = num_eps
-        self.mu_layer = layers.Dense(1)
-        self.sigma_layer = layers.Dense(1)
-        self.value_layer = layers.Dense(1, name='value')
+        self.mu_layer = layers.Dense(1, kernel_initializer='zeros')
+        self.sigma_layer = layers.Dense(1, kernel_initializer='zeros')
+        self.value_layer = layers.Dense(1, name='value', kernel_initializer='zeros')
 
         # init model
         self.call(env.observation_space.sample())
+        self.v_optimizer = tf.train.AdamOptimizer(learning_rate=0.1)
+        self.p_optimizer = tf.train.AdamOptimizer(learning_rate=0.001)
         self.optimizer = tf.train.AdamOptimizer(learning_rate=0.1)
 
-        self.actor_ws = [self.mu_layer.weights, self.sigma_layer.weights]
+        self.actor_ws = self.mu_layer.weights + self.sigma_layer.weights
         self.critic_ws = self.value_layer.weights
-        self.all_ws = self.actor_ws + [self.critic_ws]
     
     def call(self, inputs):
         x = featurize_state(inputs)
@@ -77,6 +78,23 @@ class ActorCritic(models.Model):
         self.action = tf.clip_by_value(self.action, env.action_space.low[0], env.action_space.high[0])
         return self.action, self.value
 
+    def update(self, tape):
+        policy_grads = tape.gradient(self.a_loss, self.actor_ws)
+        value_grads = tape.gradient(self.v_loss, self.critic_ws)
+        self.p_optimizer.apply_gradients(zip(policy_grads, self.actor_ws))
+        self.v_optimizer.apply_gradients(zip(value_grads, self.critic_ws))
+
+    def get_policy_loss(self, policy_target):
+        self.a_loss = -self.normal_dist.log_prob(self.action) * policy_target
+        # Add cross entropy cost to encourage exploration
+        self.a_loss -= 1e-1 * self.normal_dist.entropy()
+        return self.a_loss
+
+
+    def get_value_loss(self, value_target):
+        self.v_loss = tf.math.squared_difference(self.value, value_target)
+        return self.v_loss
+
     def get_grads(self, t, policy_target, value_target):
         self.a_loss = -self.normal_dist.log_prob(self.action) * policy_target
         # Add cross entropy cost to encourage exploration
@@ -84,13 +102,30 @@ class ActorCritic(models.Model):
         
         self.v_loss = tf.math.squared_difference(self.value, value_target)
         
-        self.loss = self.a_loss + 0.5 * self.v_loss
+        self.loss = 0.01 * self.a_loss + self.v_loss
         return t.gradient(self.loss, self.weights)
 #         actor_grads = t.gradient(self.a_loss, self.actor_ws)
 #         value_grads = t.gradient(self.v_loss, self.critic_ws)
 #         return actor_grads, value_grads
-    
+
+    def disp_final(self):
+        self.load_weights('mtnCar.h5')
+        state = self.env.reset()
+        tr = tqdm(itertools.count())
+        total_r = 0
+        for t in tr:
+            a, v = self.call(state)
+            self.env.render()
+            next_state, r, done, info = self.env.step(a)
+            total_r += r
+            tr.set_description(f"step {t} || Reward {total_r}")
+
+            if done: break
+        self.env.close()
+
     def train(self):
+        # self.load_weights('mtnCar.h5')
+        best_r = -float('inf')
         for ep in range(self.num_eps):
             tr = tqdm(itertools.count())
             state = self.env.reset()
@@ -103,15 +138,25 @@ class ActorCritic(models.Model):
                     total_r += r
                     td_target = r + 0.99 * self.call(next_state)[1]
                     td_error = td_target - v
-                
-                    grads = self.get_grads(tape, td_error, td_target)
-                self.optimizer.apply_gradients(zip(grads, self.weights))
+                    self.get_value_loss(td_target)
+                    self.get_policy_loss(td_error)
+                self.update(tape)
+
+                    # grads = self.get_grads(tape, td_error, td_target)
+                # self.optimizer.apply_gradients(zip(grads, self.weights))
+                tr.set_description(f"Ep {ep}/{self.num_eps} | Reward {total_r} | step {t}")
                 if done: break
                 
-                tr.set_description(f"Ep {ep}/{self.num_eps} | Reward {total_r} | step {t}")
+
                 state = next_state
+            if total_r >= best_r:
+                print(f'\nSaving best model with reward of {total_r}')
+                best_r = total_r
+                self.best_weights = self.weights
+                self.save_weights('mtnCar.h5')
 
 if __name__ == '__main__':
     a = ActorCritic(env)
 
     a.train()
+    a.disp_final()
