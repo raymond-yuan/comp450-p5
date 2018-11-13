@@ -30,6 +30,7 @@ featurizer = sklearn.pipeline.FeatureUnion([
         ("rbf3", RBFSampler(gamma=1.0, n_components=100)),
         ("rbf4", RBFSampler(gamma=0.5, n_components=100))
         ])
+
 featurizer.fit(scaler.transform(observation_examples))
 
 def featurize_state(state):
