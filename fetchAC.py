@@ -58,17 +58,19 @@ def featurize_state(state, raw=False, concat=False):
 
 class ActorCriticFetch(models.Model):
     def __init__(self,
-                 env):
+                 env,
+                 raw=True,
+                 concat=False):
         super(ActorCriticFetch, self).__init__()
         self.env = env
+        self.raw_feats, self.concat_feats = raw, concat
+        self.pre_mu = layers.Dense(128, activation='relu', kernel_initializer='zeros')
+        self.mu_layer = layers.Dense(3, kernel_initializer='zeros')
+        self.pre_sigma = layers.Dense(128, activation='relu', kernel_initializer='zeros')
+        self.sigma_layer = layers.Dense(3, kernel_initializer='zeros')
 
-        self.pre_mu = layers.Dense(128, activation='relu')
-        self.mu_layer = layers.Dense(3)
-        self.pre_sigma = layers.Dense(128, activation='relu')
-        self.sigma_layer = layers.Dense(3)
-
-        self.pre_value = layers.Dense(128, activation='relu')
-        self.value_layer = layers.Dense(1, name='value')
+        self.pre_value = layers.Dense(128, activation='relu', kernel_initializer='zeros')
+        self.value_layer = layers.Dense(1, name='value', kernel_initializer='zeros')
         self.call(env.reset()['observation'])
 
         self.p_weights = self.pre_mu.weights + self.mu_layer.weights + self.pre_sigma.weights + self.sigma_layer.weights
@@ -78,8 +80,8 @@ class ActorCriticFetch(models.Model):
         self.save_weights('init_weights.h5')
         self.optimizer = tf.train.AdamOptimizer(learning_rate=0.1)
 
-    def call(self, inputs, raw=True, concat=False):
-        x = featurize_state(inputs, raw, concat)
+    def call(self, inputs):
+        x = featurize_state(inputs, self.raw_feats, self.concat_feats)
         x = tf.expand_dims(x, 0)
 
         px = self.pre_value(x)
@@ -134,8 +136,6 @@ class ActorCriticFetch(models.Model):
               render=False,
               model_start='',
               model_save='fetchReach.h5',
-              raw_feats=True,
-              concat_feats=False,
               custom_r=False,
               v_lr=1.0,
               p_lr=1.0):
@@ -149,6 +149,7 @@ class ActorCriticFetch(models.Model):
         self.num_eps = num_eps
 
         best_r = -float('inf')
+        best_avg = -float('inf')
 
         num_steps = 100
         avg_r_ep = 0
@@ -161,9 +162,7 @@ class ActorCriticFetch(models.Model):
             avg_value = 0
             for t in tr:
                 with tf.GradientTape(persistent=True) as tape:
-                    a, v = self.call(state['observation'],
-                                     raw=raw_feats,
-                                     concat=concat_feats)
+                    a, v = self.call(state['observation'])
                     a = [0] + list(a.numpy())
 
                     if render:
@@ -171,7 +170,7 @@ class ActorCriticFetch(models.Model):
                     next_state, r, done, info = self.env.step(a)
 
                     if custom_r:
-                        r += (0.1 / fetch_env.goal_distance(next_state['achieved_goal'], next_state['desired_goal']))
+                        r += (0.1 / (fetch_env.goal_distance(next_state['achieved_goal'], next_state['desired_goal']) + 1e-5))
                     if done:
                         print('solved')
                     total_r += r
@@ -198,6 +197,11 @@ class ActorCriticFetch(models.Model):
 
                 state = next_state
             avg_r_ep += total_r
+
+            if avg_r_ep / (ep + 1) >= best_avg:
+                best_avg = avg_r_ep / (ep + 1)
+                self.save_weights('best_avg-' + model_save)
+
             if total_r >= best_r:
                 print(f'\nSaving best model with reward of {total_r}')
                 best_r = total_r
@@ -249,21 +253,31 @@ if __name__ == '__main__':
         a.disp_final()
     elif args.gridsearch:
         best_score = -float('inf')
-        for lr in [0.1, 0.5, 1.0]:
+        for lr in [0.01, 0.1, 0.3, 0.5, 1.0]:
             for r in [True, False]:
                 for custom_r in [True, False]:
-                    model_save = f'fetchReach-lr{lr}-raw{int(r)}-customr{int(custom_r)}.h5'
+                    a = ActorCriticFetch(env, raw=r, concat=False)
+                    model_save = f'fetchReach-lr:{lr}-raw:{r}-customr:{custom_r}.h5'
                     print(model_save)
                     a.load_weights('init_weights.h5')
-                    a.train(num_eps=500,
-                            raw_feats=r,
+                    a.train(num_eps=700,
                             custom_r=custom_r,
                             model_save=model_save
                             )
                     score = a.eval(model_save)
                     if score > best_score:
                         best_score = score
+                        best_model = model_save
                         print(f'Best model: {model_save} with score {score}')
+
+                    score = a.eval('best_avg-' + model_save)
+                    if score > best_score:
+                        best_score = score
+                        best_model = 'best_avg-' + model_save
+                        print(f"Best model: {'best_avg-' + model_save} with score {score}")
+        print()
+        print(best_model)
+        print(best_score)
 
     else:
         a.train(num_eps=args.epochs,
