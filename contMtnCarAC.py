@@ -120,7 +120,7 @@ class ActorCritic(models.Model):
             next_state, r, done, info = self.env.step(a)
             total_r += r
             tr.set_description(f"step {t} || Reward {total_r}")
-
+            state = next_state
             if done: break
         self.env.close()
 
