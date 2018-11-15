@@ -223,7 +223,7 @@ class ActorCriticFetch(models.Model):
         return score / 100.0
 
     def disp_final(self):
-        self.load_weights('fetchReach.h5')
+        self.load_weights('fetchReach-lr:0.3-raw:False-customr:True.h5')
         state = self.env.reset()
         tr = tqdm(itertools.count())
         total_r = 0
@@ -248,7 +248,7 @@ parser.add_argument('--epochs', type=int, default=200)
 args = parser.parse_args()
 
 if __name__ == '__main__':
-    a = ActorCriticFetch(env)
+    a = ActorCriticFetch(env, raw=False)
     if args.disp:
         a.disp_final()
     elif args.gridsearch:
@@ -260,18 +260,22 @@ if __name__ == '__main__':
                     model_save = f'fetchReach-lr:{lr}-raw:{r}-customr:{custom_r}.h5'
                     print(model_save)
                     a.load_weights('init_weights.h5')
-                    a.train(num_eps=700,
+                    a.train(p_lr=lr,
+                            v_lr=lr,
+                            num_eps=700,
                             custom_r=custom_r,
                             model_save=model_save
                             )
                     score = a.eval(model_save)
                     if score > best_score:
+                        print('Using best model')
                         best_score = score
                         best_model = model_save
                         print(f'Best model: {model_save} with score {score}')
 
                     score = a.eval('best_avg-' + model_save)
                     if score > best_score:
+                        print('Using best average model')
                         best_score = score
                         best_model = 'best_avg-' + model_save
                         print(f"Best model: {'best_avg-' + model_save} with score {score}")
@@ -280,7 +284,8 @@ if __name__ == '__main__':
         print(best_score)
 
     else:
-        a.train(num_eps=args.epochs,
+        a.train(
+                num_eps=args.epochs,
                 render=args.render,
                 model_start=args.model)
 
