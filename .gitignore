@@ -106,3 +106,9 @@ venv.bak/
 \.idea/
 
 *.gdoc
+
+*.h5
+
+pretrained/
+
+\.DS_Store
