@@ -38,6 +38,17 @@ featurizer = sklearn.pipeline.FeatureUnion([
 
 featurizer.fit(scaler.transform(observation_examples))
 
+parser = argparse.ArgumentParser()
+parser.add_argument('--render', action='store_true', help='Render flag')
+parser.add_argument('--raw_feats', action='store_true', help='Render flag')
+parser.add_argument('--disp', action='store_true', help='Render flag')
+parser.add_argument('--gridsearch', action='store_true', help='Render flag')
+parser.add_argument('--eval_random', action='store_true', help='Render flag')
+parser.add_argument('--model', type=str, default='')
+parser.add_argument('--eval_model', type=str, default='')
+parser.add_argument('--epochs', type=int, default=200)
+args = parser.parse_args()
+
 
 def featurize_state(state, raw=False, concat=False):
     """
@@ -57,31 +68,24 @@ def featurize_state(state, raw=False, concat=False):
 
 class ActorCriticFetch(models.Model):
     def __init__(self,
-                 env,
                  raw=True,
                  concat=False):
         super(ActorCriticFetch, self).__init__()
-        self.dist_thresh = 0.07
-        self.env = env
-
         self.core1 = layers.Dense(128, activation='relu')
         self.core2 = layers.Dense(256, activation='relu')
 
+        self.dist_thresh = 0.05
         self.raw_feats, self.concat_feats = raw, concat
-        self.pre_mu2 = layers.Dense(512, activation='relu')
-        self.mu_layer = layers.Dense(4, activation='tanh')
+        self.pre_mu = layers.Dense(512, activation='relu')
+        self.mu_layer = layers.Dense(1, activation='tanh')
 
-        self.pre_sigma2 = layers.Dense(512, activation='relu')
-        self.sigma_layer = layers.Dense(4)
+        self.pre_sigma = layers.Dense(512, activation='relu')
+        self.sigma_layer = layers.Dense(1)
 
-        self.pre_value1 = layers.Dense(512, activation='relu')
+        # self.pre_value1 = layers.Dense(256, activation='relu')
         self.pre_value2 = layers.Dense(512, activation='relu')
         self.value_layer = layers.Dense(1, name='value')
         self.call(env.reset()['observation'])
-
-        # self.p_weights = self.pre_mu1.weights + self.pre_mu2.weights + self.mu_layer.weights + self.pre_sigma1.weights + self.pre_sigma2.weights + self.sigma_layer.weights
-        # self.p_weights = self.mu_layer.weights + self.sigma_layer.weights
-        # self.v_weights = self.pre_value1.weights + self.pre_value2.weights + self.value_layer.weights
 
         self.save_weights('init_weights.h5')
         self.optimizer = tf.train.AdamOptimizer(learning_rate=0.1)
@@ -93,15 +97,15 @@ class ActorCriticFetch(models.Model):
         x = self.core1(x)
         x = self.core2(x)
 
-        px = self.pre_value1(x)
-        px = self.pre_value2(px)
+        # px = self.pre_value1(x)
+        px = self.pre_value2(x)
         self.value = self.value_layer(px)
         self.value = tf.squeeze(self.value)
 
-        pm = self.pre_mu2(x)
+        pm = self.pre_mu(x)
         self.mu = self.mu_layer(pm)
 
-        ps = self.pre_sigma2(x)
+        ps = self.pre_sigma(x)
         ps = self.sigma_layer(ps)
         # self.sigma = tf.nn.softplus(self.sigma_layer(x)) + 1e-6
         self.sigma = tf.nn.softplus(ps) + 1e-10
@@ -136,42 +140,50 @@ class ActorCriticFetch(models.Model):
         # self.v_opt.apply_gradients(zip(value_grads, self.v_weights))
 
     def get_policy_loss(self, policy_target):
-        self.a_loss = -self.normal_dist.log_prob(self.action) * tf.stop_gradient(policy_target)
+        self.a_loss = self.normal_dist.log_prob(self.action) * tf.stop_gradient(policy_target)
         # Add cross entropy cost to encourage exploration
-        self.a_loss += 1e-1 * self.normal_dist.entropy()
+        self.a_loss -= 1e-1 * self.normal_dist.entropy()
         return self.a_loss
 
     def get_value_loss(self, value_target):
-        self.v_loss = tf.math.squared_difference(self.value, value_target)
+        self.v_loss = tf.reduce_mean(tf.square(self.value - value_target))  # -tf.math.squared_difference(self.value, value_target)
         return self.v_loss
 
-    # def get_grads(self, t, policy_target, value_target):
-    #     self.a_loss = self.normal_dist.log_prob(self.action) * policy_target
-    #     # Add cross entropy cost to encourage exploration
-    #     self.a_loss -= 1e-1 * self.normal_dist.entropy()
-    #
-    #     self.v_loss = tf.math.squared_difference(self.value, value_target)
-    #
-    #     self.loss = self.a_loss + 0.5 * self.v_loss
-    #     return t.gradient(self.loss, self.weights)
+
+class MultiAC():
+    def __init__(self, env):
+        self.env = env
+        self.a1 = ActorCriticFetch(args.raw_feats)
+        self.a2 = ActorCriticFetch(args.raw_feats)
+        self.a3 = ActorCriticFetch(args.raw_feats)
+        self.a4 = ActorCriticFetch(args.raw_feats)
+        self.models = [self.a1, self.a2, self.a3, self.a4]
+        self.dist_thresh = 0.1
+
+    def call(self, inputs):
+        actions = []
+        values = []
+        for m in self.models:
+            a, v = m(inputs)
+            actions.append(a)
+            values.append(v)
+        return actions, values
 
     def train(self, num_eps=100,
               render=False,
               model_start='',
-              model_save='fetchReach.h5',
+              model_save='fetchReachMulti.h5',
               custom_r=False,
               v_lr=1.0,
               p_lr=1.0,
               verbose=1):
         best_avg_model_name = 'best_avg-' + model_save
-        self.p_opt = tf.train.RMSPropOptimizer(learning_rate=p_lr, epsilon=0.1)
-        # self.p_opt = tf.train.AdamOptimizer(learning_rate=p_lr)
 
-        # self.p_opt = tf.train.GradientDescentOptimizer(learning_rate=p_lr)
-        # self.v_opt = tf.train.AdamOptimizer(learning_rate=v_lr)
-        # self.load_weights('mtnCar.h5')
-        if model_start:
-            self.load_weights(model_start)
+        for i, m in enumerate(self.models):
+            # m.p_opt = tf.train.AdamOptimizer(learning_rate=p_lr)
+            m.p_opt = tf.train.RMSPropOptimizer(learning_rate=p_lr, epsilon=0.1)
+            # self.p_opt = tf.train.GradientDescentOptimizer(learning_rate=p_lr)
+            # m.v_opt = tf.train.AdamOptimizer(learning_rate=v_lr)
 
         self.num_eps = num_eps
         best_r = -float('inf')
@@ -187,32 +199,33 @@ class ActorCriticFetch(models.Model):
             ep_iter = range(self.num_eps)
 
         solve_count = 0
+        avg = 0
         for ep in ep_iter:
             tr = range(num_steps)
             if verbose == 1:
                 tr = tqdm(tr)
 
-            # tr = tqdm(itertools.count())
             state = self.env.reset()
-            # self.env.distance_threshold = 5
+
             total_r = 0
             avg_value = 0
             actions = np.zeros(4, dtype=np.float64)
-            avg = 0
+
             for t in tr:
                 with tf.GradientTape(persistent=True) as tape:
-                    a, v = self.call(state['observation'])
+                    action, value = self.call(state['observation'])
 
-                    # a = list(a.numpy()) + [0]
-                    actions += a
+                    actions += action
                     if render:
                         self.env.render()
-                    next_state, r, done, info = self.env.step(a)
+                    next_state, r, done, info = self.env.step(action)
                     d = fetch_env.goal_distance(next_state['achieved_goal'], next_state['desired_goal'])
                     done = d <= self.dist_thresh and t > 1
                     if custom_r:
                         r = (self.dist_thresh / (d + 1e-6))
                         r = min(r, 1.0)
+                        # substitute_goal = state['achieved_goal'].copy()
+                        # r = env.compute_reward(state['achieved_goal'], substitute_goal, info)
 
                     if done:
                         solve_count += 1
@@ -220,19 +233,22 @@ class ActorCriticFetch(models.Model):
                         if custom_r:
                             r += 5
                     total_r += r
-                    avg_value += v.numpy()
-                    td_target = r + 0.99 * self.call(next_state['observation'])[1]
-                    td_error = td_target - v
-                    vloss = self.get_value_loss(td_target)
-                    ploss = tf.reduce_mean(self.get_policy_loss(td_error))
-                    self.loss = vloss + ploss
-                    # if custom_r:
-                    #     self.loss *= -1
-                self.update(tape)
+                    avg_value += tf.reduce_mean(value)
+                    self.loss = []
+                    for i, m in enumerate(self.models):
+                        td_target = r + 0.99 * m(next_state['observation'])[1]
+                        td_error = td_target - value[i]
+                        vloss = m.get_value_loss(td_target)
+                        ploss = tf.reduce_mean(m.get_policy_loss(td_error))
+                        m.loss = vloss + ploss
+                        self.loss.append(m.loss)
+                        # if not custom_r:
+                        #     m.loss *= -1
 
-                # grads = self.get_grads(tape, td_error, td_target)
-                # self.optimizer.apply_gradients(zip(grads, self.weights))
-                # "Frame Reward {:.3f} | "
+                for m in self.models:
+                    m.update(tape)
+                self.loss = tf.reduce_mean(self.loss)
+
                 if verbose == 1:
                     tr.set_description("Ep {}/{} | "
                                        "Loss {:.3f} | "
@@ -246,7 +262,6 @@ class ActorCriticFetch(models.Model):
                                                                         solve_count / (ep + 1),
                                                                         avg_r_ep
                                                                         ))
-                                   # "Avg Reward {:.3f} | "
                 if done:
                     break
 
@@ -265,25 +280,28 @@ class ActorCriticFetch(models.Model):
             if fetch_env.goal_distance(actions, prev_actions) < 0.1:
                 print('Possible error: actions same as previous state {}\n'.format(actions / num_steps))
             prev_actions = actions
-            avg = avg_r_ep #avg_r_ep / (ep + 1)
+            avg = avg_r_ep
             if avg >= best_avg and ep > 10:
                 print(f'\nSaving best average model with reward of {avg} to {best_avg_model_name}')
                 best_avg = avg
-                self.save_weights('pretrained/' + best_avg_model_name)
+                for i, m in enumerate(self.models):
+                    m.save_weights('pretrained/' + str(i) + best_avg_model_name)
 
             if total_r >= best_r:
                 print(f'\nSaving best model with reward of {total_r} to {model_save}')
                 best_r = total_r
-                self.best_weights = self.weights
-                self.save_weights('pretrained/' + model_save)
-        self.save_weights('pretrained/last_' + model_save)
+                for i, m in enumerate(self.models):
+                    m.save_weights('pretrained/' + str(i) + model_save)
+        for i, m in enumerate(self.models):
+            m.save_weights('pretrained/last_' + str(i) + model_save)
 
     def eval(self, model_name='', random=False):
         if not random:
-            self.load_weights('pretrained/' + model_name)
+            for i, m in self.models:
+                m.load_weights('pretrained/' + str(i) + model_name)
         score = 0
         solve_count = 0
-        tr = tqdm(range(100))
+        tr = tqdm(range(200))
         for ep in tr:
             state = self.env.reset()
             tr.set_description("Solve percentage: {:.3f}".format(solve_count / (ep + 1)))
@@ -320,22 +338,11 @@ class ActorCriticFetch(models.Model):
             if done: break
         self.env.close()
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--render', action='store_true', help='Render flag')
-parser.add_argument('--raw_feats', action='store_true', help='Render flag')
-parser.add_argument('--disp', action='store_true', help='Render flag')
-parser.add_argument('--gridsearch', action='store_true', help='Render flag')
-parser.add_argument('--eval_random', action='store_true', help='Render flag')
-parser.add_argument('--model', type=str, default='')
-parser.add_argument('--eval_model', type=str, default='')
-parser.add_argument('--epochs', type=int, default=200)
-args = parser.parse_args()
-
 if __name__ == '__main__':
     if not os.path.exists('pretrained'):
         os.makedirs('pretrained/')
 
-    a = ActorCriticFetch(env, raw=args.raw_feats)
+    a = MultiAC(env)
     if args.disp:
 
         a.disp_final()
@@ -344,65 +351,11 @@ if __name__ == '__main__':
         print(a.eval(model_name=args.eval_model))
     elif args.eval_random:
         print(a.eval(random=True))
-    elif args.gridsearch:
-        best_score = -float('inf')
-        for plr in [0.01, 0.1, 1.0, 5]:
-            for vlr in [0.1, 1.0, 5]:
-                # for r in [True, False]:
-                #     for custom_r in [True, False]:
-                a = ActorCriticFetch(env, raw=False, concat=False)
-                model_save = f'negLoss-fetchReach-plr:{plr}-vlr:{vlr}-raw:{False}-customr:{True}.h5'
-
-                print("""{}""".format(model_save))
-                a.load_weights('init_weights.h5')
-                a.train(p_lr=plr,
-                        v_lr=vlr,
-                        num_eps=500,
-                        custom_r=True,
-                        model_save=model_save
-                        )
-                score = a.eval(model_save)
-                if score > best_score:
-                    print('Using best model')
-                    best_score = score
-                    best_model = model_save
-                    print(f'Best model: {model_save} with score {score}')
-
-                score = a.eval('best_avg-' + model_save)
-                if score > best_score:
-                    print('Using best average model')
-                    best_score = score
-                    best_model = 'best_avg-' + model_save
-                    print(f"Best model: {'best_avg-' + model_save} with score {score}")
-
-        print()
-        print(best_model)
-        print(best_score)
 
     else:
         a.train(p_lr=1e-4,
                 num_eps=args.epochs,
                 render=args.render,
                 model_start=args.model,
+                model_save='fetchReachMulti2.h5',
                 custom_r=True)
-
-
-
-# def policy(observation, desired_goal):
-#     # Here you would implement your smarter policy. In this case,
-#     # we just sample random actions.
-#     return env.action_space.sample()
-#
-# while not done:
-#     env.render()
-#     action = policy(obs['observation'], obs['desired_goal'])
-#     obs, reward, done, info = env.step(action)
-#
-#     # If we want, we can substitute a goal here and re-compute
-#     # the reward. For instance, we can just pretend that the desired
-#     # goal was what we achieved all along.
-#     substitute_goal = obs['achieved_goal'].copy()
-#     substitute_reward = env.compute_reward(
-#         obs['achieved_goal'], substitute_goal, info)
-#     print('reward is {}, substitute_reward is {}'.format(
-#         reward, substitute_reward))
