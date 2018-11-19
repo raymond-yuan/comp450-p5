@@ -10,6 +10,7 @@ from critic import Critic
 import random
 import tensorflow as tf
 import gym
+from gym.envs.robotics.fetch.reach import FetchReachEnv
 import argparse
 import tensorflow.contrib.eager as tfe
 
@@ -46,13 +47,13 @@ class DDPG():
     """ Deep Deterministic Policy Gradient (DDPG) Helper Class
     """
 
-    def __init__(self, act_dim, env_dim, act_range, k, buffer_size=20000, gamma=0.99, lr=0.00005, tau=0.001):
+    def __init__(self, act_dim, env_dim, act_range, k, buffer_size=10000, gamma=0.99, lr=0.001, tau=0.001):
         """ Initialization
         """
         # Environment and A2C parameters
         self.act_dim = act_dim
         self.act_range = act_range
-        self.env_dim = (1,) + env_dim
+        self.env_dim = (1,) + (13,)
         self.gamma = gamma
         # Create actor and critic networks
         self.actor = Actor(self.env_dim, act_dim, act_range, 0.1 * lr, tau)
@@ -91,19 +92,32 @@ class DDPG():
 
     def sample_batch(self, batch_size):
         if self.count < batch_size:
-            idx = None
             batch = random.sample(self.buffer, self.count)
         else:
-            idx = None
             batch = random.sample(self.buffer, batch_size)
 
-        # Return a batch of experience
-        s_batch = np.array([i[0] for i in batch])
-        a_batch = np.array([i[1] for i in batch])
-        r_batch = np.array([i[2] for i in batch])
-        d_batch = np.array([i[3] for i in batch])
-        new_s_batch = np.array([i[4] for i in batch])
-        return s_batch, a_batch, r_batch, d_batch, new_s_batch, idx
+        s_batch, a_batch, r_batch, d_batch, s2_batch = [], [], [], [], []
+        for s_, a_, r_, d_, s2_ in batch:
+            s_batch.append(s_)
+            s2_batch.append(s2_)
+            a_batch.append(a_)
+            r_batch.append(r_)
+            d_batch.append(d_)
+        s_batch = np.squeeze(np.array(s_batch), axis=1)
+        s2_batch = np.squeeze(np.array(s2_batch), axis=1)
+        r_batch = np.reshape(np.array(r_batch), (len(r_batch), 1))
+        a_batch = np.array(a_batch)
+
+        d_batch = np.reshape(np.array(d_batch, dtype=int), (len(batch), 1))
+        return s_batch, a_batch, r_batch, d_batch, s2_batch
+
+        # # Return a batch of experience
+        # s_batch = np.array([i[0] for i in batch])
+        # a_batch = np.array([i[1] for i in batch])
+        # r_batch = np.array([i[2] for i in batch])
+        # d_batch = np.array([i[3] for i in batch])
+        # new_s_batch = np.array([i[4] for i in batch])
+        # return s_batch, a_batch, r_batch, d_batch, new_s_batch
 
     def update_models(self, states, actions, critic_target):
         """ Update actor and critic networks from sampled experience
@@ -124,6 +138,29 @@ class DDPG():
         de_1 = np.reshape(state['desired_goal'], (1, 3))
         return np.concatenate([ob_1, de_1], axis=1)
 
+    def store_states(self, state, action, reward, done, info, new_state):
+        # print(state['observation'].shape)
+        ob_1 = np.reshape(state['observation'], (1, 10))
+        ac_1 = np.reshape(state['achieved_goal'], (1, 3))
+        de_1 = np.reshape(state['desired_goal'], (1, 3))
+        ob_2 = np.reshape(new_state['observation'], (1, 10))
+        s_1 = np.concatenate([ob_1, ac_1], axis=1)
+        s2_1 = np.concatenate([ob_2, ac_1], axis=1)
+        s_2 = np.concatenate([ob_1, de_1], axis=1)
+        s2_2 = np.concatenate([ob_2, de_1], axis=1)
+        substitute_goal = state['achieved_goal'].copy()
+        substitute_reward = env.compute_reward(state['achieved_goal'], substitute_goal, info)
+
+        e1 = (s_2, action, reward, done, s2_2)
+        e2 = (s_1, action, substitute_reward, True, s2_1)
+        if self.count + 2 < self.buffer_size:
+            self.count += 2
+        else:
+            self.buffer.popleft()
+            self.buffer.popleft()
+        self.buffer.append(e1)
+        self.buffer.append(e2)
+
     def train(self, env, args):
         results = []
         num_steps = 200
@@ -134,25 +171,31 @@ class DDPG():
 
             # Reset episode
             time, cumul_reward, done = 0, 0, False
-            old_state = env.reset()['observation']
+            s = env.reset()
             noise = OrnsteinUhlenbeckActionNoise(mu=np.zeros(self.act_dim))
             # noise = OrnsteinUhlenbeckProcess(size=self.act_dim)
 
             for _ in range(num_steps):
                 if args.render: env.render()
                 # Actor picks an action (following the deterministic policy)
-
+                old_state = self.format_state(s)
+                # print(old_state.shape)
                 a = self.policy_action(old_state)
                 # Clip continuous values to be valid w.r.t. environment
                 a = np.clip(a + noise(), -self.act_range, self.act_range)
                 # Retrieve new state, reward, and whether the state is terminal
                 a = np.squeeze(a)
-                new_state, r, done, _ = env.step(a)
-                new_state = new_state['observation']
+                new_state, r, done, info = env.step(a)
+
+                # new_state = new_state['observation']
+
                 # Add outputs to memory buffer
-                self.memorize(old_state, a, r, done, new_state)
+                # self.memorize(old_state, a, r, done, new_state)
+                self.store_states(s, a, r, done, info, new_state)
+
+                s = new_state
                 # Sample experience from buffer
-                states, actions, rewards, dones, new_states, _ = self.sample_batch(args.batch_size)
+                states, actions, rewards, dones, new_states = self.sample_batch(args.batch_size)
                 # Predict target q-values using target networks
                 # print(new_states.shape)
                 # print(self.actor.target_predict(new_states).shape)
@@ -162,9 +205,11 @@ class DDPG():
                 # Train both networks on sampled batch, update target networks
                 self.update_models(states, actions, critic_target)
                 # Update current state
-                old_state = new_state
+
                 cumul_reward += r
                 time += 1
+                if done:
+                    break
 
             # Display score
             if cumul_reward >= best_score:
@@ -177,7 +222,7 @@ class DDPG():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Training parameters')
-    parser.add_argument('--batch_size', type=int, default=64, help="Batch size (experience replay)")
+    parser.add_argument('--batch_size', type=int, default=128, help="Batch size (experience replay)")
     parser.add_argument('--render', dest='render', action='store_true', help="Render environment while training")
     parser.add_argument('--nb_episodes', type=int, default=5000, help="Number of training episodes")
     args = parser.parse_args()
@@ -185,11 +230,12 @@ if __name__ == '__main__':
     consec_frames = 4
     # Continuous Environments Wrapp
     # er
-    env = gym.make('FetchReach-v1')
+    # env = gym.make('FetchReach-v1')
+    env = FetchReachEnv()
     env.reset()
 
     state_dim = env.reset()['observation'].shape
-    action_space = gym.make('FetchReach-v1').action_space
+    action_space = FetchReachEnv().action_space
     action_dim = action_space.high.shape[0]
     act_range = action_space.high
 

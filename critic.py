@@ -12,19 +12,24 @@ from tensorflow.keras import layers
 class CriticModel(Model):
     def __init__(self, env_dim, act_dim):
         super(CriticModel, self).__init__()
-        self.d1 = layers.Dense(256, input_shape=(env_dim,), activation='relu')
-        self.d2 = layers.Dense(256, activation='relu')
+        self.b1 = layers.BatchNormalization(center=True, scale=True, input_shape=(None, 13))
+        self.d1 = layers.Dense(200, activation='relu')
+        self.b2 = layers.BatchNormalization(center=True, scale=True)
 
-        self.a1 = layers.Dense(256, input_shape=(4,))
+        self.d2 = layers.Dense(200, activation='relu')
 
+        self.a1 = layers.Dense(200, input_shape=(4,))
+        self.b3 = layers.BatchNormalization(center=True, scale=True)
         self.d3 = layers.Dense(300, activation='relu')
-        self.out_layer = layers.Dense(1, kernel_initializer=RandomUniform())
+        self.out_layer = layers.Dense(1, kernel_initializer=RandomUniform(minval=-0.003, maxval=0.003))
 
     def call(self, inputs):
         inputs, action = inputs
+        inputs = tf.constant(inputs)
         # print(inputs.shape)
-
-        x = self.d1(inputs)
+        x = self.b1(inputs)
+        x = self.d1(x)
+        x = self.b2(x)
         x = self.d2(x)
 
         a = self.a1(action)
@@ -32,6 +37,7 @@ class CriticModel(Model):
         #
         # print("feats", x.shape)
         c = tf.concat([x, a], axis=1)
+        c = self.b3(c)
         x = self.d3(c)
         out = self.out_layer(x)
         return out
@@ -88,5 +94,5 @@ class Critic:
         """
         W, target_W = self.model.get_weights(), self.target_model.get_weights()
         for i in range(len(W)):
-            target_W[i] = self.tau * W[i] + (1 - self.tau)* target_W[i]
+            target_W[i] = self.tau * W[i] + (1 - self.tau) * target_W[i]
         self.target_model.set_weights(target_W)
