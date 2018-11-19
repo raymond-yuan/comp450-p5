@@ -11,6 +11,7 @@ import random
 import tensorflow as tf
 import gym
 from gym.envs.robotics.fetch.reach import FetchReachEnv
+from gym.envs.robotics.fetch_env import goal_distance
 import argparse
 import tensorflow.contrib.eager as tfe
 
@@ -21,6 +22,9 @@ tf.enable_eager_execution()
 # from utils.memory_buffer import MemoryBuffer
 
 class OrnsteinUhlenbeckActionNoise:
+    """
+    From OpenAI's implementation of Ornstein Action Noise
+    """
     def __init__(self, mu, sigma=0.3, theta=.15, dt=1e-2, x0=None):
         self.theta = theta
         self.mu = mu
@@ -165,15 +169,21 @@ class DDPG():
         num_steps = 200
         # First, gather experience
         tqdm_e = tqdm(range(args.nb_episodes), desc='Score', leave=True, unit="episode")
+
+        noise = OrnsteinUhlenbeckActionNoise(mu=np.zeros(self.act_dim))
+        avg_r_ep = 0
+
+        best_avg = 0
         best_score = -float('inf')
 
-        avg_r_ep = 0
+        past_samples = 15
+        hist_ratio = deque(maxlen=past_samples)
+        hist_scores = deque(maxlen=past_samples)
         for e in tqdm_e:
 
             # Reset episode
             time, cumul_reward, done = 0, 0, False
             s = env.reset()
-            noise = OrnsteinUhlenbeckActionNoise(mu=np.zeros(self.act_dim))
             # noise = OrnsteinUhlenbeckProcess(size=self.act_dim)
 
             for _ in range(num_steps):
@@ -187,7 +197,7 @@ class DDPG():
                 # Retrieve new state, reward, and whether the state is terminal
                 a = np.squeeze(a)
                 new_state, r, done, info = env.step(a)
-
+                dist = goal_distance(new_state['achieved_goal'], new_state['desired_goal'])
                 # new_state = new_state['observation']
 
                 # Add outputs to memory buffer
@@ -195,20 +205,21 @@ class DDPG():
                 self.store_states(s, a, r, done, info, new_state)
 
                 s = new_state
-                # Sample experience from buffer
-                states, actions, rewards, dones, new_states = self.sample_batch(args.batch_size)
-                # Predict target q-values using target networks
-                # print(new_states.shape)
-                # print(self.actor.target_predict(new_states).shape)
-                q_values = self.critic.target_predict([new_states, self.actor.target_predict(new_states)])
-                # Compute critic target
-                critic_target = self.bellman(rewards, q_values, dones)
-                # Train both networks on sampled batch, update target networks
-                self.update_models(states, actions, critic_target)
-                # Update current state
-
                 cumul_reward += r
-                time += 1
+
+                if args.batch_size < self.count:
+                    # Sample experience from buffer
+                    states, actions, rewards, dones, new_states = self.sample_batch(args.batch_size)
+                    # Predict target q-values using target networks
+                    # print(new_states.shape)
+                    # print(self.actor.target_predict(new_states).shape)
+                    q_values = self.critic.target_predict([new_states, self.actor.target_predict(new_states)])
+                    # Compute critic target
+                    critic_target = self.bellman(rewards, q_values, dones)
+                    # Train both networks on sampled batch, update target networks
+                    self.update_models(states, actions, critic_target)
+                    # Update current state
+
                 if done:
                     break
 
@@ -216,11 +227,28 @@ class DDPG():
                 avg_r_ep = cumul_reward
             else:
                 avg_r_ep = avg_r_ep * 0.99 + cumul_reward * 0.01
+
+            if avg_r_ep > best_avg:
+                best_avg = avg_r_ep
+                self.actor.model.save_weights('pretrained/best_avg_ddpgActor.h5')
+                self.critic.model.save_weights('pretrained/best_avg_ddpgCritic.h5')
             # Display score
             if cumul_reward >= best_score:
                 best_score = cumul_reward
+                self.actor.model.save_weights('pretrained/ddpgActor.h5')
+                self.critic.model.save_weights('pretrained/ddpgCrtic.h5')
 
-            tqdm_e.set_description("Score: {} | Best Reward: {} | Average Reward {:.3f}".format(cumul_reward, best_score, avg_r_ep))
+            hist_ratio.append(int(dist <= 0.05))
+            hist_scores.append(cumul_reward)
+
+            tqdm_e.set_description("Score: {} | "
+                                   "Best Reward: {} | "
+                                   "Avg Reward, solve ratio over last {} samples: {:.3f}, {:.3f}".format(cumul_reward,
+                                                                                                        best_score,
+                                                                                                        past_samples,
+                                                                                                        np.mean(hist_scores),
+                                                                                                        np.mean(hist_ratio)
+                                                                                                        ))
             tqdm_e.refresh()
 
         return results
@@ -236,7 +264,7 @@ if __name__ == '__main__':
     # Continuous Environments Wrapp
     # er
     # env = gym.make('FetchReach-v1')
-    env = FetchReachEnv()
+    env = FetchReachEnv(reward_type='sparse')
     env.reset()
 
     state_dim = env.reset()['observation'].shape
