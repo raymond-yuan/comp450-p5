@@ -16,7 +16,6 @@ import tensorflow.contrib.eager as tfe
 
 # from ddpg import Environment
 # from ddpg import DDPG
-from cont_env import Environment
 
 tf.enable_eager_execution()
 # from utils.memory_buffer import MemoryBuffer
@@ -167,6 +166,8 @@ class DDPG():
         # First, gather experience
         tqdm_e = tqdm(range(args.nb_episodes), desc='Score', leave=True, unit="episode")
         best_score = -float('inf')
+
+        avg_r_ep = 0
         for e in tqdm_e:
 
             # Reset episode
@@ -211,11 +212,15 @@ class DDPG():
                 if done:
                     break
 
+            if avg_r_ep == 0:
+                avg_r_ep = cumul_reward
+            else:
+                avg_r_ep = avg_r_ep * 0.99 + cumul_reward * 0.01
             # Display score
             if cumul_reward >= best_score:
                 best_score = cumul_reward
 
-            tqdm_e.set_description("Score: {} | Best Reward: {}".format(cumul_reward, best_score))
+            tqdm_e.set_description("Score: {} | Best Reward: {} | Average Reward {:.3f}".format(cumul_reward, best_score, avg_r_ep))
             tqdm_e.refresh()
 
         return results
