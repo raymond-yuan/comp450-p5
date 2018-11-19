@@ -173,7 +173,7 @@ class DDPG():
         noise = OrnsteinUhlenbeckActionNoise(mu=np.zeros(self.act_dim))
         avg_r_ep = 0
 
-        best_avg = 0
+        best_avg = -float('inf')
         best_score = -float('inf')
 
         past_samples = 15
@@ -228,7 +228,7 @@ class DDPG():
             else:
                 avg_r_ep = avg_r_ep * 0.99 + cumul_reward * 0.01
 
-            if avg_r_ep > best_avg:
+            if avg_r_ep >= best_avg:
                 best_avg = avg_r_ep
                 self.actor.model.save_weights('pretrained/best_avg_ddpgActor.h5')
                 self.critic.model.save_weights('pretrained/best_avg_ddpgCritic.h5')
@@ -242,9 +242,10 @@ class DDPG():
             hist_scores.append(cumul_reward)
 
             tqdm_e.set_description("Score: {} | "
-                                   "Best Reward: {} | "
+                                   "Best Reward: {} (avg: {:.2f})| "
                                    "Avg Reward, solve ratio over last {} samples: {:.3f}, {:.3f}".format(cumul_reward,
-                                                                                                        best_score,
+                                                                                                        np.amax(hist_scores),
+                                                                                                         avg_r_ep,
                                                                                                         past_samples,
                                                                                                         np.mean(hist_scores),
                                                                                                         np.mean(hist_ratio)
