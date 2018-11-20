@@ -252,9 +252,10 @@ class DDPG():
         score = 0
         solve_count = 0
         tr = tqdm(range(100))
+        avg_time = 0
         for ep in tr:
             state = env.reset()
-            tr.set_description("Solve percentage: {:.3f}".format(solve_count / (ep + 1)))
+
             for t in range(50):
                 if render:
                     env.render()
@@ -270,7 +271,9 @@ class DDPG():
                     solve_count += 1
                     break
                 score += r
-
+            tr.set_description("Solve percentage: {:.3f}".format(solve_count / (ep + 1)))
+            avg_time += t
+        print("average time to solve:", avg_time / 100.0)
         return score / 100.0
 
 if __name__ == '__main__':
