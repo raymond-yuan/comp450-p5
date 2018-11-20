@@ -2,21 +2,16 @@ import numpy as np
 from collections import deque
 
 from tqdm import tqdm
-# from ddpg import Actor
-# from ddpg import Critic
 from actor import Actor
 from critic import Critic
 
 import random
 import tensorflow as tf
-import gym
 from gym.envs.robotics.fetch.reach import FetchReachEnv
 from gym.envs.robotics.fetch_env import goal_distance
 import argparse
 import tensorflow.contrib.eager as tfe
 
-# from ddpg import Environment
-# from ddpg import DDPG
 
 tf.enable_eager_execution()
 # from utils.memory_buffer import MemoryBuffer
@@ -170,7 +165,7 @@ class DDPG():
         # First, gather experience
         tqdm_e = tqdm(range(args.nb_episodes), desc='Score', leave=True, unit="episode")
 
-        noise = OrnsteinUhlenbeckActionNoise(mu=np.zeros(self.act_dim))
+
         avg_r_ep = 0
 
         best_avg = -float('inf')
@@ -180,7 +175,7 @@ class DDPG():
         hist_ratio = deque(maxlen=past_samples)
         hist_scores = deque(maxlen=past_samples)
         for e in tqdm_e:
-
+            noise = OrnsteinUhlenbeckActionNoise(mu=np.zeros(self.act_dim))
             # Reset episode
             time, cumul_reward, done = 0, 0, False
             s = env.reset()
@@ -201,24 +196,20 @@ class DDPG():
                 # new_state = new_state['observation']
 
                 # Add outputs to memory buffer
-                # self.memorize(old_state, a, r, done, new_state)
                 self.store_states(s, a, r, done, info, new_state)
 
                 s = new_state
                 cumul_reward += r
 
-                if args.batch_size < self.count:
-                    # Sample experience from buffer
-                    states, actions, rewards, dones, new_states = self.sample_batch(args.batch_size)
-                    # Predict target q-values using target networks
-                    # print(new_states.shape)
-                    # print(self.actor.target_predict(new_states).shape)
-                    q_values = self.critic.target_predict([new_states, self.actor.target_predict(new_states)])
-                    # Compute critic target
-                    critic_target = self.bellman(rewards, q_values, dones)
-                    # Train both networks on sampled batch, update target networks
-                    self.update_models(states, actions, critic_target)
-                    # Update current state
+                # Sample experience from buffer
+                states, actions, rewards, dones, new_states = self.sample_batch(args.batch_size)
+                # Predict target q-values using target networks
+                q_values = self.critic.target_predict([new_states, self.actor.target_predict(new_states)])
+                # Compute critic target
+                critic_target = self.bellman(rewards, q_values, dones)
+                # Train both networks on sampled batch, update target networks
+                self.update_models(states, actions, critic_target)
+                # Update current state
 
                 if done:
                     break
@@ -236,7 +227,7 @@ class DDPG():
             if cumul_reward >= best_score:
                 best_score = cumul_reward
                 self.actor.model.save_weights('pretrained/ddpgActor.h5')
-                self.critic.model.save_weights('pretrained/ddpgCrtic.h5')
+                self.critic.model.save_weights('pretrained/ddpgCritic.h5')
 
             hist_ratio.append(int(dist <= 0.05))
             hist_scores.append(cumul_reward)
@@ -254,11 +245,41 @@ class DDPG():
 
         return results
 
+    def eval(self, env, model_name='', random=False, render=False):
+        if not random:
+            self.actor.model.load_weights('pretrained/' + model_name + 'Actor.h5')
+            self.critic.model.load_weights('pretrained/' + model_name + 'Critic.h5')
+        score = 0
+        solve_count = 0
+        tr = tqdm(range(100))
+        for ep in tr:
+            state = env.reset()
+            tr.set_description("Solve percentage: {:.3f}".format(solve_count / (ep + 1)))
+            for t in range(50):
+                if render:
+                    env.render()
+                if random:
+                    a = env.action_space.sample()
+                else:
+                    a = self.policy_action(self.format_state(state))[0]
+
+                state, r, done, info = env.step(a)
+                d = goal_distance(state['achieved_goal'], state['desired_goal'])
+                done = d <= 0.05
+                if done:
+                    solve_count += 1
+                    break
+                score += r
+
+        return score / 100.0
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Training parameters')
     parser.add_argument('--batch_size', type=int, default=128, help="Batch size (experience replay)")
     parser.add_argument('--render', dest='render', action='store_true', help="Render environment while training")
     parser.add_argument('--nb_episodes', type=int, default=5000, help="Number of training episodes")
+    parser.add_argument('--eval_model', type=str, default='')
+    parser.add_argument('--eval_random', action='store_true', help='evaluate random performance on env')
     args = parser.parse_args()
 
     consec_frames = 4
@@ -274,4 +295,9 @@ if __name__ == '__main__':
     act_range = action_space.high
 
     algo = DDPG(action_dim, state_dim, act_range, consec_frames)
-    algo.train(env, args)
+    if args.eval_model != '':
+        print(algo.eval(env, model_name=args.eval_model, render=args.render))
+    elif args.eval_random:
+        print(algo.eval(env, random=True, render=args.render))
+    else:
+        algo.train(env, args)
